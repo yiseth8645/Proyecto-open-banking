@@ -1,0 +1,132 @@
+# openbanking_modelo_caso_D.py
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report, mean_squared_error, r2_score
+import warnings
+warnings.filterwarnings("ignore")
+
+PATH = r"C:\Users\Admin\Desktop\Proyecto open banking\casos_uso\caso_D_brecha_genero.csv"
+
+print("📌 Cargando Caso D (brecha de género)...")
+df = pd.read_csv(PATH, encoding="latin-1")
+print(f"✔ Filas: {df.shape[0]}, Columnas: {df.shape[1]}\n")
+
+if "TOTAL_AHORROS" not in df.columns:
+    saldo_candidates = [c for c in df.columns if "SALDO TOTAL CTA AHORROS" in c]
+    saldo_elec_candidates = [c for c in df.columns if "ELECTRONICAS" in c and "SALDO" in c]
+    if saldo_candidates and saldo_elec_candidates:
+        df["TOTAL_AHORROS"] = df[saldo_candidates[0]].fillna(0) + df[saldo_elec_candidates[0]].fillna(0)
+        print("⚠ TOTAL_AHORROS recalculado usando:", saldo_candidates[0], "+", saldo_elec_candidates[0])
+    else:
+        saldo_cols = [c for c in df.columns if "SALDO" in c]
+        if saldo_cols:
+            df["TOTAL_AHORROS"] = df[saldo_cols].fillna(0).sum(axis=1)
+            print("⚠ TOTAL_AHORROS recalculado como suma de columnas SALDO*")
+        else:
+            print("⚠ No se encontró columna SALDO; TOTAL_AHORROS no creado.")
+
+target_col = None
+if "BRECHA_RELATIVA" in df.columns:
+    target_col = "BRECHA_RELATIVA"
+    print("Usando 'BRECHA_RELATIVA' como base del objetivo.")
+elif "BRECHA_AHORROS_GENERO" in df.columns:
+    target_col = "BRECHA_AHORROS_GENERO"
+    print("Usando 'BRECHA_AHORROS_GENERO' como base del objetivo.")
+else:
+    if ("SALDO CTA AHORRO HOMBRES" in df.columns) and ("SALDO CTA AHORRO MUJERES" in df.columns):
+        df["BRECHA_AHORROS_GENERO"] = df["SALDO CTA AHORRO HOMBRES"].fillna(0) - df["SALDO CTA AHORRO MUJERES"].fillna(0)
+        target_col = "BRECHA_AHORROS_GENERO"
+        print("Construida BRECHA_AHORROS_GENERO a partir de SALDO HOMBRES / MUJERES.")
+    else:
+        raise SystemExit("❌ No se encontró ninguna columna relacionada con la brecha de género (BRECHA_RELATIVA o BRECHA_AHORROS_GENERO).")
+
+
+print("\n--- Diagnóstico target ---")
+print(f"Column used: {target_col}")
+print(df[target_col].describe())
+
+series_for_label = df[target_col].abs() if df[target_col].min() < 0 else df[target_col]
+
+
+df["OBJ_BIN"] = (series_for_label > series_for_label.median()).astype(int)
+print("\nDistribución OBJ_BIN (primer intento):")
+print(df["OBJ_BIN"].value_counts())
+
+exclude = ["TIPO DE ENTIDAD","CODIGO DE LA ENTIDAD","NOMBRE DE LA ENTIDAD",
+           "FECHA DE CORTE","UNIDAD DE CAPTURA","DEPARTAMENTO","MUNICIPIO",
+           "RENGLON","TIPO"]
+cols = [c for c in df.columns if c not in exclude]
+num_df = df[cols].select_dtypes(include=[np.number]).copy()
+
+print(f"\nVariables numéricas detectadas: {num_df.shape[1]}")
+print("Muestra primeras columnas:", list(num_df.columns[:12]))
+
+
+const_cols = [c for c in num_df.columns if num_df[c].nunique() <= 1]
+if const_cols:
+    print(f"Eliminando columnas constantes (n={len(const_cols)}): {const_cols[:10]}")
+    num_df.drop(columns=const_cols, inplace=True)
+
+
+num_df = num_df.fillna(num_df.median())
+
+
+if target_col in num_df.columns:
+    num_df = num_df.drop(columns=[target_col])
+
+print("Variables numéricas finales para modelado:", num_df.shape[1])
+
+
+y = df["OBJ_BIN"]
+if y.nunique() < 2:
+    print("\n⚠ OBJ_BIN es monoclase. Creando etiqueta alterna por quantiles (q=2).")
+    df["OBJ_Q2"] = pd.qcut(series_for_label.rank(method="first"), q=2, labels=False)
+    print("Distrib OBJ_Q2:", df["OBJ_Q2"].value_counts().to_dict())
+    y = df["OBJ_Q2"]
+
+if y.nunique() < 2:
+    print("\n⚠ Aun no hay 2 clases. Se realizará regresión sobre la métrica de brecha.")
+    X = num_df.copy()
+    if X.shape[1] == 0:
+        raise SystemExit("❌ No hay variables numéricas útiles para modelar.")
+    X_train, X_test, y_train, y_test = train_test_split(X, series_for_label, test_size=0.3, random_state=42)
+    reg = RandomForestRegressor(n_estimators=300, random_state=42)
+    reg.fit(X_train, y_train)
+    y_pred = reg.predict(X_test)
+    print("\n===== Regresión sobre brecha =====")
+    print("RMSE:", mean_squared_error(y_test, y_pred, squared=False))
+    print("R2   :", r2_score(y_test, y_pred))
+    importances = pd.Series(reg.feature_importances_, index=X.columns).sort_values(ascending=False).head(20)
+    print("\nTop variables (regresión):")
+    print(importances)
+    importances.head(15)[::-1].plot(kind="barh", figsize=(10,8), title="Top importancias (regresión - Caso D)")
+    plt.xlabel("Importancia"); plt.tight_layout(); plt.show()
+else:
+
+    print("\n➡ Entrando en clasificación (RandomForestClassifier)...")
+    print("Clases y counts:", y.value_counts().to_dict())
+
+    X = num_df.copy()
+    if X.shape[1] == 0:
+        raise SystemExit("❌ No hay variables numéricas útiles para modelar.")
+
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42, stratify=y)
+    clf = RandomForestClassifier(n_estimators=300, random_state=42, class_weight="balanced")
+    clf.fit(X_train, y_train)
+    y_pred = clf.predict(X_test)
+
+    print("\n===== classification_report =====")
+    print(classification_report(y_test, y_pred))
+
+    importances = pd.Series(clf.feature_importances_, index=X.columns).sort_values(ascending=False).head(20)
+    print("\nTop variables (clasificación):")
+    print(importances)
+
+
+    importances.head(15)[::-1].plot(kind="barh", figsize=(10,8), title="Top importancias (clasificación - Caso D)")
+    plt.xlabel("Importancia"); plt.tight_layout(); plt.show()
+
+print("\n✅ Script Caso D finalizado. Copia aquí la salida (classification_report / métricas) y revisamos interpretaciones.")

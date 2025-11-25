@@ -1,0 +1,116 @@
+# openbanking_modelo_caso_E.py
+import os
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report
+import joblib
+
+CASE_E_PATH = r"C:\Users\Admin\Desktop\Proyecto open banking\casos_uso\caso_E_oportunidades_producto.csv"
+OUTPUT_DIR = r"C:\Users\Admin\Desktop\Proyecto open banking\model_outputs"
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+print("📌 Cargando Caso E (oportunidades de producto)...")
+df = pd.read_csv(CASE_E_PATH, encoding="latin-1")
+print(f"✔ Filas: {df.shape[0]}, Columnas: {df.shape[1]}\n")
+
+df.columns = [c.strip() for c in df.columns]
+
+print("===== DIAGNÓSTICO INICIAL =====")
+if "TOTAL_AHORROS" in df.columns:
+    print("TOTAL_AHORROS: min,max,median: ", df["TOTAL_AHORROS"].min(),
+          df["TOTAL_AHORROS"].max(), df["TOTAL_AHORROS"].median())
+else:
+    print("ATENCIÓN: TOTAL_AHORROS no existe en el archivo. Verifica que lo hayas creado en creacion_casos.py")
+
+num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+print("\nVariables numéricas detectadas:", len(num_cols))
+
+nan_count = df.isna().sum().sort_values(ascending=False).head(10)
+print("\nTotal NaNs por columna (top 10):")
+print(nan_count)
+
+if "POTENCIAL_CREDITO" not in df.columns:
+
+    if "TOTAL_AHORROS" in df.columns:
+        df["POTENCIAL_CREDITO"] = df["TOTAL_AHORROS"] * 0.2
+        print("\n✔ POTENCIAL_CREDITO creado (TOTAL_AHORROS * 0.2)")
+    else:
+        raise SystemExit("ERROR: no encontro TOTAL_AHORROS para crear POTENCIAL_CREDITO.")
+
+median_val = df["POTENCIAL_CREDITO"].median()
+df["OBJ_BIN"] = (df["POTENCIAL_CREDITO"] > median_val).astype(int)
+print(f"\nTarget POTENCIAL_CREDITO mediana = {median_val:.4f} -> OBJ_BIN creado")
+
+print("\nDistrib OBJ_BIN:")
+print(df["OBJ_BIN"].value_counts())
+
+exclude_prefix = [
+    "TIPO DE ENTIDAD", "CODIGO DE LA ENTIDAD", "NOMBRE DE LA ENTIDAD", "FECHA DE CORTE",
+    "UNIDAD DE CAPTURA", "DEPARTAMENTO", "MUNICIPIO", "RENGLON", "TIPO"
+]
+exclude_cols = [c for c in df.columns if any(e == c for e in exclude_prefix)]
+print("\nColumnas a excluir (identificadores):", exclude_cols)
+
+numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+
+features = [c for c in numeric_cols if c not in ("OBJ_BIN", "POTENCIAL_CREDITO") and c not in exclude_cols]
+
+const_cols = [c for c in features if df[c].nunique(dropna=True) <= 1]
+if const_cols:
+    print(f"\nColumnas constantes (se eliminarán): {len(const_cols)} -> {const_cols[:12]}{'...' if len(const_cols)>12 else ''}")
+    features = [c for c in features if c not in const_cols]
+
+print("\nColumnas numéricas finales:", len(features))
+
+if len(features) < 3:
+    raise SystemExit("Pocas variables numéricas útiles. Revisa la limpieza o agrega features.")
+
+X = df[features].copy()
+X = X.fillna(0)
+
+y = df["OBJ_BIN"]
+
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.30, stratify=y, random_state=42)
+print(f"\n✔ Split: X_train {X_train.shape}, X_test {X_test.shape}")
+
+
+print("\n➡ Entrando en clasificación (RandomForestClassifier)...")
+clf = RandomForestClassifier(n_estimators=200, random_state=42, class_weight="balanced")
+clf.fit(X_train, y_train)
+
+y_pred = clf.predict(X_test)
+print("\n===== classification_report =====")
+print(classification_report(y_test, y_pred, digits=4))
+
+importances = pd.Series(clf.feature_importances_, index=features).sort_values(ascending=False)
+topN = 15
+top_imp = importances.head(topN)
+
+print("\nTop variables (clasificación):")
+print(top_imp)
+
+plt.figure(figsize=(10,8))
+top_imp[::-1].plot(kind="barh")
+plt.title("Top importancias (clasificación - Caso E)")
+plt.xlabel("Importancia")
+plt.tight_layout()
+png_out = os.path.join(OUTPUT_DIR, "importancias_caso_E.png")
+plt.savefig(png_out, dpi=150)
+plt.show()
+print(f"\n✔ Gráfica guardada en: {png_out}")
+
+model_path = os.path.join(OUTPUT_DIR, "rf_model_caso_E.pkl")
+joblib.dump(clf, model_path)
+print(f"\n✔ Modelo guardado en: {model_path}")
+
+df_out = df.copy()
+df_out["PROB_POS"] = clf.predict_proba(X.fillna(0))[:,1]
+df_out["PRED_BIN"] = clf.predict(X.fillna(0))
+out_csv = os.path.join(OUTPUT_DIR, "caso_E_results_with_preds.csv")
+df_out.to_csv(out_csv, index=False, encoding="latin-1")
+print(f"✔ Resultados guardados en: {out_csv}")
+
+print("\n✅ Script Caso E finalizado. Copia aquí el classification_report y las top variables si quieres interpretarlo.")
